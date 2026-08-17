@@ -676,6 +676,42 @@ function renderLivePlayers(players) {
 }
 
 /* ================================================================
+   12.5 랜덤 닉네임 배정 (실명 입력 방지 — 귀여운 포켓몬 이름 자동 부여)
+================================================================ */
+const NICKNAME_POOL = [
+  "피카츄", "라이츄", "파이리", "리자드", "리자몽", "꼬부기", "어니부기", "거북왕",
+  "이상해씨", "이상해풀", "이상해꽃", "버터플리", "캐터피", "뿔충이", "구구", "피죤",
+  "피죤투", "꼬렛", "레트라", "아보", "아보크", "모래두지", "고지", "냐옹",
+  "페르시안", "고라파덕", "골덕", "망키", "성원숭", "삐삐", "픽시", "식스테일",
+  "나인테일", "푸린", "푸크린", "또가스", "캥카", "슬리프", "슬리퍼", "잠만보",
+  "망나뇽", "미뇽", "신뇽", "토게피", "토게틱", "피츄", "이브이", "뮤", "뮤츠", "메타몽",
+];
+
+async function assignRandomNickname(sessionId) {
+  let taken = new Set();
+  if (firebaseEnabled) {
+    try {
+      const snap = await db.collection("sessions").doc(sessionId).collection("players").get();
+      snap.forEach((doc) => {
+        const n = doc.data().nickname;
+        if (n) taken.add(n);
+      });
+    } catch (e) {
+      console.error("[Firestore] 기존 참여자 닉네임 조회 실패 — 중복 확인 없이 배정합니다.", e);
+    }
+  }
+
+  const available = shuffleInPlace(NICKNAME_POOL.filter((n) => !taken.has(n)));
+  if (available.length > 0) return available[0];
+
+  // 반 인원이 이름 풀보다 많을 때: 이름 뒤에 번호를 붙여서라도 계속 유니크하게 배정한다.
+  const base = NICKNAME_POOL[Math.floor(Math.random() * NICKNAME_POOL.length)];
+  let n = 2;
+  while (taken.has(`${base}${n}`)) n++;
+  return `${base}${n}`;
+}
+
+/* ================================================================
    13. 학생 모드 진입
 ================================================================ */
 function detectMode() {
@@ -705,6 +741,12 @@ function detectMode() {
     $("studentInvalidMsg").hidden = true;
     $("studentTopicBadge").textContent = "📚 " + topicObj.title;
     $("studentClassBadge").textContent = "🏫 " + cls;
+
+    assignRandomNickname(session).then((nickname) => {
+      state.nickname = nickname;
+      $("assignedNicknameText").textContent = nickname;
+      $("btnStartGame").disabled = false;
+    });
   } else {
     state.mode = "teacher";
     $("teacherPanel").hidden = false;
@@ -717,22 +759,14 @@ function detectMode() {
 }
 
 $("btnStartGame").addEventListener("click", async () => {
-  const nickname = $("inputNickname").value.trim();
-  const msg = $("nicknameMsg");
-  if (!nickname) {
-    msg.textContent = "닉네임을 입력해주세요.";
-    msg.hidden = false;
-    return;
-  }
-  msg.hidden = true;
+  if (!state.nickname) return; // 닉네임 배정이 아직 끝나지 않음 (버튼도 비활성화되어 있어 정상적으론 도달하지 않음)
 
-  state.nickname = nickname;
   state.playerId = generateId();
 
   const topic = getTopicById(state.topicId);
   state.round = buildRound(topic);
 
-  await fsCreatePlayer(state.sessionId, state.playerId, nickname, state.round.totalCount);
+  await fsCreatePlayer(state.sessionId, state.playerId, state.nickname, state.round.totalCount);
 
   renderGameHeader();
   renderCategoryBar();
@@ -745,8 +779,8 @@ $("btnStartGame").addEventListener("click", async () => {
 /* ================================================================
    14. 라운드 구성
 ================================================================ */
-// 한 판에 뿌릴 풍선(카드) 총 개수 기본값. 5개씩 3줄 배치를 기준으로 15개.
-const TOTAL_BALLOON_COUNT = 15;
+// 한 판에 뿌릴 풍선(카드) 총 개수 기본값. 3개씩 3줄 배치를 기준으로 9개.
+const TOTAL_BALLOON_COUNT = 9;
 
 function buildRound(topic) {
   const n = topic.categories.length;
@@ -884,7 +918,8 @@ function handleCorrect(card, el, selectedCategory) {
   fsUpdateProgress(state.sessionId, state.playerId, state.round.remainingCount, state.round.wrongCount);
 
   setTimeout(() => {
-    el.remove();
+    // DOM에서 제거하지 않고 그대로 둔다 — 터진 풍선 자리는 빈 공간으로 남고
+    // (popping 애니메이션이 opacity:0으로 고정) 나머지 풍선은 그리드에서 움직이지 않는다.
     state.inputLocked = false;
     if (state.round.remainingCount <= 0) {
       finishGame();
@@ -1051,10 +1086,6 @@ $("btnRetry").addEventListener("click", async () => {
 });
 
 $("btnBackToTopics").addEventListener("click", () => {
-  if (state.mode === "student") {
-    $("inputNickname").value = "";
-    $("nicknameMsg").hidden = true;
-  }
   showScreen("start");
 });
 

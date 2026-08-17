@@ -56,10 +56,12 @@
       <p id="studentInvalidMsg" class="invalid-msg" hidden>⚠ 세션 정보가 올바르지 않습니다. 선생님께 QR코드를 다시 요청하세요.</p>
 
       <div id="studentJoinBlock">
-        <label class="field-label" for="inputNickname">닉네임 (최대 10자)</label>
-        <input id="inputNickname" type="text" maxlength="10" placeholder="닉네임을 입력하세요" autocomplete="off" />
-        <p id="nicknameMsg" class="invalid-msg" hidden></p>
-        <button id="btnStartGame" class="btn btn-primary btn-large" type="button">게임 시작</button>
+        <span class="field-label">내 닉네임</span>
+        <div id="assignedNicknameBox" class="assigned-nickname-box">
+          <span id="assignedNicknameText" class="assigned-nickname-text">뽑는 중...</span>
+        </div>
+        <p class="field-hint">실명 대신 닉네임이 자동으로 배정돼요. 같은 반 안에서는 겹치지 않아요.</p>
+        <button id="btnStartGame" class="btn btn-primary btn-large" type="button" disabled>게임 시작</button>
 
         <div class="rules-box">
           <h3>🎈 게임 규칙</h3>
@@ -196,7 +198,7 @@
       <ol class="guide-list">
         <li>교사 화면에서 <b>학습 주제</b>와 <b>반</b>을 선택합니다.</li>
         <li><b>QR 코드 생성하기</b>를 눌러 QR 화면을 프로젝터/TV에 띄웁니다.</li>
-        <li>학생들이 태블릿으로 QR을 스캔하고 <b>닉네임</b>을 입력해 게임을 시작합니다.</li>
+        <li>학생들이 태블릿으로 QR을 스캔하면 <b>닉네임이 자동으로 배정</b>되고, 게임을 시작합니다.</li>
         <li>QR 화면에서 <b>실시간 현황판</b>으로 이동해 학생들의 참여·진행 상황을 확인합니다.</li>
         <li>학생들이 모두 끝나면 각자의 결과 화면에서 <b>랭킹</b>을 확인합니다.</li>
       </ol>
