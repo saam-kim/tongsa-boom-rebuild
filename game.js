@@ -745,9 +745,19 @@ $("btnStartGame").addEventListener("click", async () => {
 /* ================================================================
    14. 라운드 구성
 ================================================================ */
+// 한 판에 뿌릴 풍선(카드) 총 개수 기본값. 5개씩 3줄 배치를 기준으로 15개.
+const TOTAL_BALLOON_COUNT = 15;
+
 function buildRound(topic) {
-  const categories = topic.categories.map((cat) => {
-    const cardTexts = pickRandomN(cat.cards, 6);
+  const n = topic.categories.length;
+  const base = Math.floor(TOTAL_BALLOON_COUNT / n);
+  const remainder = TOTAL_BALLOON_COUNT % n;
+  // 나머지는 매 판 무작위로 다른 유형에 배분해, 특정 유형이 항상 더 많이 나오지 않도록 한다.
+  const extraIdx = new Set(shuffleInPlace(topic.categories.map((_, i) => i)).slice(0, remainder));
+
+  const categories = topic.categories.map((cat, idx) => {
+    const count = base + (extraIdx.has(idx) ? 1 : 0);
+    const cardTexts = pickRandomN(cat.cards, count);
     return { name: cat.name, cardTexts, remaining: cardTexts.length, total: cardTexts.length, done: false };
   });
 
