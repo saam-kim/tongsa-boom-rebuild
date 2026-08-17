@@ -33,16 +33,6 @@
         <ul id="dataErrorList" class="error-list"></ul>
       </div>
 
-      <div class="panel-block" id="urlSettingBlock">
-        <h2 class="panel-title">연동 설정</h2>
-        <label class="field-label" for="inputGameBaseUrl">학생용 게임 접속 URL</label>
-        <div class="field-row">
-          <input id="inputGameBaseUrl" type="text" placeholder="예: https://내아이디.github.io/저장소/index.html" />
-          <button id="btnSaveUrl" class="btn btn-secondary" type="button">저장</button>
-        </div>
-        <p class="field-hint">이 값을 저장하면 config.js의 gameBaseUrl 대신 이 브라우저에서는 이 값이 우선 사용됩니다.</p>
-      </div>
-
       <div class="panel-block">
         <h2 class="panel-title">학습 주제 선택</h2>
         <div id="topicList" class="topic-list"></div>
@@ -94,7 +84,7 @@
       </div>
       <h2 class="section-heading">학생들에게 QR코드를 보여주세요</h2>
 
-      <p id="qrUrlWarning" class="warning-msg" hidden>⚠ 게임 접속 URL이 설정되지 않아 QR코드를 생성할 수 없습니다. 위 화면의 "연동 설정"에서 URL을 입력한 뒤 다시 시도해주세요.</p>
+      <p id="qrUrlWarning" class="warning-msg" hidden>⚠ 게임 접속 URL이 설정되지 않아 QR코드를 생성할 수 없습니다. config.js의 gameBaseUrl 값을 입력한 뒤 다시 시도해주세요.</p>
 
       <div id="qrImageWrap" class="qr-image-wrap">
         <img id="qrImage" alt="게임 접속 QR코드" />

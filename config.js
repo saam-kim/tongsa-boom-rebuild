@@ -38,8 +38,6 @@ const firebaseConfig = {
 // 예) GitHub Pages에 올렸다면:
 //     "https://내아이디.github.io/저장소이름/index.html"
 // 비워두면("") QR 코드가 생성되지 않고 안내 문구가 표시됩니다.
-// (교사 화면의 "연동 설정" 패널에서 이 값을 임시로 덮어쓸 수도 있습니다.
-//  그 경우 이 브라우저에만 저장되며 config.js의 값보다 우선 적용됩니다.)
 // ----------------------------------------------------------------
 const gameBaseUrl = "https://saam-kim.github.io/tongsa-boom-rebuild/index.html";
 

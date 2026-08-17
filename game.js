@@ -161,11 +161,10 @@ function validateGameSets(gameSets) {
 }
 
 /* ================================================================
-   4. 로컬 저장(랭킹 폴백 / 게임 접속 URL 오버라이드 / 화면 설정)
+   4. 로컬 저장(랭킹 폴백 / 화면 설정)
 ================================================================ */
 const LS_KEYS = {
   results: "tongsaBoom_localResults",
-  gameBaseUrl: "tongsaBoom_gameBaseUrl",
   visualPrefs: "tongsaBoom_visualPrefs",
 };
 
@@ -188,22 +187,6 @@ function saveLocalResult(result) {
 function resetLocalRanking() {
   try {
     localStorage.removeItem(LS_KEYS.results);
-  } catch (e) {
-    console.error(e);
-  }
-}
-
-function getEffectiveGameBaseUrl() {
-  try {
-    const override = localStorage.getItem(LS_KEYS.gameBaseUrl);
-    if (override) return override;
-  } catch (e) {}
-  return (window.APP_CONFIG && window.APP_CONFIG.gameBaseUrl) || "";
-}
-function saveGameBaseUrlOverride(url) {
-  try {
-    if (url) localStorage.setItem(LS_KEYS.gameBaseUrl, url);
-    else localStorage.removeItem(LS_KEYS.gameBaseUrl);
   } catch (e) {
     console.error(e);
   }
@@ -582,13 +565,6 @@ function updateGenerateBtn() {
   $("btnGenerateQr").disabled = !(dataValidation.valid && state.selectedTopicId && state.selectedClass);
 }
 
-$("inputGameBaseUrl").value = getEffectiveGameBaseUrl();
-$("btnSaveUrl").addEventListener("click", () => {
-  const val = $("inputGameBaseUrl").value.trim();
-  saveGameBaseUrlOverride(val);
-  showFeedback("correct", "저장되었습니다.");
-});
-
 $("btnGenerateQr").addEventListener("click", async () => {
   if ($("btnGenerateQr").disabled) return;
   const topic = getTopicById(state.selectedTopicId);
@@ -611,7 +587,7 @@ function renderQrScreen() {
   $("qrTopicBadge").textContent = "📚 " + state.topicTitle;
   $("qrClassBadge").textContent = "🏫 " + state.className;
 
-  const baseUrl = getEffectiveGameBaseUrl();
+  const baseUrl = (window.APP_CONFIG && window.APP_CONFIG.gameBaseUrl) || "";
   const warning = $("qrUrlWarning");
   const imgWrap = $("qrImageWrap");
   const img = $("qrImage");
