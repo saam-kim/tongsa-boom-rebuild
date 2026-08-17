@@ -1,0 +1,1104 @@
+// ================================================================
+// 통사풍선터뜨리기 — game.js (게임 로직 / 교사가 건드리지 않는 파일)
+// ================================================================
+"use strict";
+
+/* ================================================================
+   0. Firebase 초기화
+================================================================ */
+let db = null;
+let firebaseEnabled = false;
+try {
+  const cfg = (window.APP_CONFIG && window.APP_CONFIG.firebaseConfig) || {};
+  if (cfg.apiKey && cfg.apiKey !== "PASTE_YOUR_FIREBASE_CONFIG_HERE") {
+    firebase.initializeApp(cfg);
+    db = firebase.firestore();
+    firebaseEnabled = true;
+  } else {
+    console.warn("[통사풍선터뜨리기] firebaseConfig가 설정되지 않아 실시간 연동 없이 동작합니다.");
+  }
+} catch (e) {
+  console.error("[통사풍선터뜨리기] Firebase 초기화 실패", e);
+  firebaseEnabled = false;
+}
+
+/* ================================================================
+   1. 공통 유틸
+================================================================ */
+function $(id) { return document.getElementById(id); }
+
+function shuffleInPlace(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function pickRandomN(arr, n) {
+  const copy = shuffleInPlace(arr.slice());
+  return copy.slice(0, Math.min(n, copy.length));
+}
+
+function generateId() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return "id-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function formatSeconds(ms) {
+  return (ms / 1000).toFixed(1);
+}
+
+function formatMs(ms) {
+  return (ms / 1000).toFixed(1) + "초";
+}
+
+function getTopicById(id) {
+  return (window.GAME_SETS || []).find((t) => t.id === id) || null;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str == null ? "" : String(str);
+  return div.innerHTML;
+}
+
+/* ================================================================
+   2. 화면 전환 / 모달 헬퍼
+================================================================ */
+function showScreen(id) {
+  document.querySelectorAll(".screen").forEach((el) => el.classList.remove("active"));
+  const target = $("screen-" + id);
+  if (target) target.classList.add("active");
+  window.scrollTo(0, 0);
+}
+
+function openModal(id) { $(id).hidden = false; }
+function closeModal(id) { $(id).hidden = true; }
+
+let confirmCallback = null;
+function showConfirm(message, onYes) {
+  $("confirmMessage").textContent = message;
+  confirmCallback = onYes;
+  openModal("confirmModal");
+}
+$("btnConfirmYes").addEventListener("click", () => {
+  closeModal("confirmModal");
+  const cb = confirmCallback;
+  confirmCallback = null;
+  if (cb) cb();
+});
+$("btnConfirmNo").addEventListener("click", () => {
+  closeModal("confirmModal");
+  confirmCallback = null;
+});
+
+let feedbackTimeoutId = null;
+const FEEDBACK_MS = { correct: 1100, wrong: 1900, notice: 1500 };
+function showFeedback(type, message) {
+  const bar = $("feedbackBar");
+  clearTimeout(feedbackTimeoutId);
+  bar.textContent = message;
+  bar.className = "feedback-bar show type-" + type;
+  feedbackTimeoutId = setTimeout(() => {
+    bar.classList.remove("show");
+  }, FEEDBACK_MS[type] || 1200);
+}
+
+/* ================================================================
+   3. 데이터 검증
+================================================================ */
+function validateGameSets(gameSets) {
+  const errors = [];
+  if (!Array.isArray(gameSets) || gameSets.length === 0) {
+    errors.push("gameSets가 비어있거나 배열이 아닙니다. data.js를 확인하세요.");
+    return { valid: false, errors };
+  }
+  const seenIds = new Set();
+  gameSets.forEach((topic, ti) => {
+    const label = topic && topic.title ? `"${topic.title}"` : `${ti + 1}번째 주제`;
+    if (!topic || !topic.id) {
+      errors.push(`${label}: id가 없습니다.`);
+    } else if (seenIds.has(topic.id)) {
+      errors.push(`${label}: id "${topic.id}"가 다른 주제와 중복되었습니다.`);
+    } else {
+      seenIds.add(topic.id);
+    }
+    if (!topic || !topic.title) errors.push(`${label}: title이 없습니다.`);
+
+    if (!topic || !Array.isArray(topic.categories) || topic.categories.length < 2) {
+      errors.push(`${label}: 개념 유형(categories)이 2개 이상이어야 합니다.`);
+      return;
+    }
+    const catNames = new Set();
+    topic.categories.forEach((cat, ci) => {
+      const catLabel = `${label} > ${(cat && cat.name) || `${ci + 1}번째 유형`}`;
+      if (!cat || !cat.name) {
+        errors.push(`${catLabel}: 유형 이름이 없습니다.`);
+      } else if (catNames.has(cat.name)) {
+        errors.push(`${catLabel}: 유형 이름이 중복되었습니다.`);
+      } else {
+        catNames.add(cat.name);
+      }
+      if (!cat || !Array.isArray(cat.cards) || cat.cards.length < 6) {
+        errors.push(`${catLabel}: 카드가 최소 6개 이상이어야 합니다. (현재 ${cat && cat.cards ? cat.cards.length : 0}개)`);
+      } else {
+        const seenCards = new Set();
+        cat.cards.forEach((card) => {
+          const trimmed = (card || "").trim();
+          if (!trimmed) {
+            errors.push(`${catLabel}: 빈 카드 문장이 있습니다.`);
+          } else if (seenCards.has(trimmed)) {
+            errors.push(`${catLabel}: 카드 문장 "${trimmed}"가 중복되었습니다.`);
+          } else {
+            seenCards.add(trimmed);
+          }
+        });
+      }
+    });
+  });
+  return { valid: errors.length === 0, errors };
+}
+
+/* ================================================================
+   4. 로컬 저장(랭킹 폴백 / 게임 접속 URL 오버라이드 / 화면 설정)
+================================================================ */
+const LS_KEYS = {
+  results: "tongsaBoom_localResults",
+  gameBaseUrl: "tongsaBoom_gameBaseUrl",
+  visualPrefs: "tongsaBoom_visualPrefs",
+};
+
+function getLocalResults() {
+  try {
+    return JSON.parse(localStorage.getItem(LS_KEYS.results)) || [];
+  } catch (e) {
+    return [];
+  }
+}
+function saveLocalResult(result) {
+  try {
+    const list = getLocalResults();
+    list.push(result);
+    localStorage.setItem(LS_KEYS.results, JSON.stringify(list));
+  } catch (e) {
+    console.error("로컬 결과 저장 실패", e);
+  }
+}
+function resetLocalRanking() {
+  try {
+    localStorage.removeItem(LS_KEYS.results);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function getEffectiveGameBaseUrl() {
+  try {
+    const override = localStorage.getItem(LS_KEYS.gameBaseUrl);
+    if (override) return override;
+  } catch (e) {}
+  return (window.APP_CONFIG && window.APP_CONFIG.gameBaseUrl) || "";
+}
+function saveGameBaseUrlOverride(url) {
+  try {
+    if (url) localStorage.setItem(LS_KEYS.gameBaseUrl, url);
+    else localStorage.removeItem(LS_KEYS.gameBaseUrl);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+const DEFAULT_VISUAL_PREFS = { theme: "premium-blue", cardSize: "medium", float: true, particles: true };
+function getVisualPrefs() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_KEYS.visualPrefs));
+    return Object.assign({}, DEFAULT_VISUAL_PREFS, raw || {});
+  } catch (e) {
+    return Object.assign({}, DEFAULT_VISUAL_PREFS);
+  }
+}
+function saveVisualPrefs(prefs) {
+  try {
+    localStorage.setItem(LS_KEYS.visualPrefs, JSON.stringify(prefs));
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+/* ================================================================
+   5. Firestore 연동 (실패해도 게임 진행에는 영향 없음)
+================================================================ */
+async function fsCreateSession(topicId, topicTitle, className) {
+  const sessionId = `${topicId}_${className}_${Date.now()}`;
+  if (firebaseEnabled) {
+    try {
+      await db.collection("sessions").doc(sessionId).set({
+        topicId,
+        topicTitle,
+        className,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      console.error("[Firestore] 세션 생성 실패", e);
+    }
+  }
+  return sessionId;
+}
+
+async function fsCreatePlayer(sessionId, playerId, nickname, totalCount) {
+  if (!firebaseEnabled) return;
+  try {
+    await db.collection("sessions").doc(sessionId).collection("players").doc(playerId).set({
+      nickname,
+      status: "playing",
+      totalCount,
+      remainingCount: totalCount,
+      wrongCount: 0,
+      clearMs: null,
+      penaltyMs: null,
+      finalMs: null,
+      joinedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+  } catch (e) {
+    console.error("[Firestore] 플레이어 생성 실패", e);
+  }
+}
+
+async function fsUpdateProgress(sessionId, playerId, remainingCount, wrongCount) {
+  if (!firebaseEnabled) return;
+  try {
+    await db.collection("sessions").doc(sessionId).collection("players").doc(playerId).update({
+      remainingCount,
+      wrongCount,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+  } catch (e) {
+    console.error("[Firestore] 진행 상황 갱신 실패", e);
+  }
+}
+
+async function fsFinishPlayer(sessionId, playerId, data) {
+  if (!firebaseEnabled) return;
+  try {
+    await db.collection("sessions").doc(sessionId).collection("players").doc(playerId).update({
+      status: "finished",
+      clearMs: data.clearMs,
+      penaltyMs: data.penaltyMs,
+      finalMs: data.finalMs,
+      wrongCount: data.wrongCount,
+      remainingCount: 0,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    await db.collection("results").add({
+      nickname: data.nickname,
+      className: data.className,
+      topicId: data.topicId,
+      topicTitle: data.topicTitle,
+      clearMs: data.clearMs,
+      wrongCount: data.wrongCount,
+      penaltyMs: data.penaltyMs,
+      finalMs: data.finalMs,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+  } catch (e) {
+    console.error("[Firestore] 결과 저장 실패", e);
+  }
+}
+
+let liveUnsubscribe = null;
+function fsSubscribeLive(sessionId) {
+  fsUnsubscribeLive();
+  if (!firebaseEnabled) return;
+  try {
+    liveUnsubscribe = db
+      .collection("sessions")
+      .doc(sessionId)
+      .collection("players")
+      .onSnapshot(
+        (snapshot) => {
+          const players = [];
+          snapshot.forEach((doc) => players.push(Object.assign({ id: doc.id }, doc.data())));
+          renderLivePlayers(players);
+        },
+        (err) => console.error("[Firestore] 실시간 구독 오류", err)
+      );
+  } catch (e) {
+    console.error("[Firestore] 실시간 구독 실패", e);
+  }
+}
+function fsUnsubscribeLive() {
+  if (liveUnsubscribe) {
+    liveUnsubscribe();
+    liveUnsubscribe = null;
+  }
+}
+
+async function fetchRanking(topicId, className) {
+  if (firebaseEnabled) {
+    try {
+      const snap = await db
+        .collection("results")
+        .where("topicId", "==", topicId)
+        .where("className", "==", className)
+        .orderBy("finalMs", "asc")
+        .limit(10)
+        .get();
+      return { source: "firebase", items: snap.docs.map((d) => d.data()) };
+    } catch (e) {
+      console.error("[Firestore] 랭킹 조회 실패 (인덱스가 필요할 수 있습니다) — 로컬 기록으로 대체합니다.", e);
+    }
+  }
+  const local = getLocalResults()
+    .filter((r) => r.topicId === topicId && r.className === className)
+    .sort((a, b) => a.finalMs - b.finalMs)
+    .slice(0, 10);
+  return { source: "local", items: local };
+}
+
+/* ================================================================
+   6. 전역 상태
+================================================================ */
+const state = {
+  mode: null, // 'teacher' | 'student'
+  selectedTopicId: null,
+  selectedClass: null,
+
+  topicId: null,
+  topicTitle: null,
+  className: null,
+  sessionId: null,
+  playerId: null,
+  nickname: null,
+
+  round: null, // { categories, cards, selectedCategory, remainingCount, totalCount, wrongCount }
+  inputLocked: false,
+
+  timer: { startTime: null, intervalId: null, elapsedMs: 0 },
+  visualPrefs: getVisualPrefs(),
+};
+
+/* ================================================================
+   7. 배경 장식 풍선
+================================================================ */
+function renderBgBalloons() {
+  const wrap = $("bgBalloons");
+  const colors = ["var(--balloon-1)", "var(--balloon-2)", "var(--balloon-3)", "var(--balloon-4)", "var(--balloon-5)", "var(--balloon-6)"];
+  let html = "";
+  for (let i = 0; i < 14; i++) {
+    const size = 40 + Math.round(Math.random() * 70);
+    const left = Math.round(Math.random() * 100);
+    const duration = 14 + Math.random() * 12;
+    const delay = Math.random() * -20;
+    const color = colors[i % colors.length];
+    html += `<div class="bg-balloon" style="width:${size}px;height:${size}px;left:${left}%;background:${color};animation-duration:${duration}s;animation-delay:${delay}s;"></div>`;
+  }
+  wrap.innerHTML = html;
+}
+
+/* ================================================================
+   8. 화면 설정 적용
+================================================================ */
+const THEME_LIST = [
+  { id: "premium-blue", label: "프리미엄 블루", swatch: "linear-gradient(135deg,#60a5fa,#2563eb)" },
+  { id: "sunset-festa", label: "선셋 페스타", swatch: "linear-gradient(135deg,#fb923c,#f2622e)" },
+  { id: "galaxy-pop", label: "갤럭시 팝", swatch: "linear-gradient(135deg,#a78bfa,#6d28d9)" },
+];
+const CARD_SIZE_LIST = [
+  { id: "small", label: "작게" },
+  { id: "medium", label: "보통" },
+  { id: "large", label: "크게" },
+];
+
+function applyVisualPrefs() {
+  const prefs = state.visualPrefs;
+  document.documentElement.setAttribute("data-theme", prefs.theme);
+  $("app").setAttribute("data-card-size", prefs.cardSize);
+  $("app").classList.toggle("no-float", !prefs.float);
+}
+
+function renderSettingsPanel() {
+  const prefs = state.visualPrefs;
+  const themeWrap = $("themeOptions");
+  themeWrap.innerHTML = THEME_LIST.map(
+    (t) => `<button type="button" class="theme-swatch${prefs.theme === t.id ? " selected" : ""}" style="background:${t.swatch}" data-theme-id="${t.id}" title="${t.label}"></button>`
+  ).join("");
+  themeWrap.querySelectorAll(".theme-swatch").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.visualPrefs.theme = btn.dataset.themeId;
+      saveVisualPrefs(state.visualPrefs);
+      applyVisualPrefs();
+      renderSettingsPanel();
+    });
+  });
+
+  const sizeWrap = $("cardSizeOptions");
+  sizeWrap.innerHTML = CARD_SIZE_LIST.map(
+    (s) => `<button type="button" class="pill-option${prefs.cardSize === s.id ? " selected" : ""}" data-size-id="${s.id}">${s.label}</button>`
+  ).join("");
+  sizeWrap.querySelectorAll(".pill-option").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.visualPrefs.cardSize = btn.dataset.sizeId;
+      saveVisualPrefs(state.visualPrefs);
+      applyVisualPrefs();
+      renderSettingsPanel();
+    });
+  });
+
+  $("toggleFloat").checked = prefs.float;
+  $("toggleParticles").checked = prefs.particles;
+}
+
+$("toggleFloat").addEventListener("change", (e) => {
+  state.visualPrefs.float = e.target.checked;
+  saveVisualPrefs(state.visualPrefs);
+  applyVisualPrefs();
+});
+$("toggleParticles").addEventListener("change", (e) => {
+  state.visualPrefs.particles = e.target.checked;
+  saveVisualPrefs(state.visualPrefs);
+});
+
+$("btnSettingsPanel").addEventListener("click", () => {
+  renderSettingsPanel();
+  openModal("settingsModal");
+});
+$("btnCloseSettings").addEventListener("click", () => closeModal("settingsModal"));
+$("btnGuide").addEventListener("click", () => openModal("guideModal"));
+$("btnCloseGuide").addEventListener("click", () => closeModal("guideModal"));
+
+/* ================================================================
+   9. 파티클(풍선 터짐 효과)
+================================================================ */
+const particleCanvas = $("particleCanvas");
+const pctx = particleCanvas.getContext("2d");
+function resizeCanvas() {
+  particleCanvas.width = window.innerWidth;
+  particleCanvas.height = window.innerHeight;
+}
+window.addEventListener("resize", resizeCanvas);
+resizeCanvas();
+
+let particles = [];
+let particleLoopRunning = false;
+const PARTICLE_COLORS = ["#60a5fa", "#f472b6", "#facc15", "#4ade80", "#c084fc", "#22d3ee"];
+
+function spawnParticles(x, y) {
+  if (!state.visualPrefs.particles) return;
+  for (let i = 0; i < 22; i++) {
+    particles.push({
+      x,
+      y,
+      vx: (Math.random() - 0.5) * 7,
+      vy: -Math.random() * 6 - 1,
+      life: 1,
+      color: PARTICLE_COLORS[Math.floor(Math.random() * PARTICLE_COLORS.length)],
+      size: Math.random() * 4 + 2,
+      rot: Math.random() * Math.PI,
+    });
+  }
+  if (!particleLoopRunning) runParticleLoop();
+}
+
+function runParticleLoop() {
+  particleLoopRunning = true;
+  function frame() {
+    pctx.clearRect(0, 0, particleCanvas.width, particleCanvas.height);
+    particles.forEach((p) => {
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.18;
+      p.life -= 0.018;
+    });
+    particles = particles.filter((p) => p.life > 0);
+    particles.forEach((p) => {
+      pctx.globalAlpha = Math.max(p.life, 0);
+      pctx.fillStyle = p.color;
+      pctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size * 1.6);
+    });
+    pctx.globalAlpha = 1;
+    if (particles.length > 0) {
+      requestAnimationFrame(frame);
+    } else {
+      particleLoopRunning = false;
+    }
+  }
+  requestAnimationFrame(frame);
+}
+
+/* ================================================================
+   10. 교사 모드 — 시작 화면
+================================================================ */
+let dataValidation = { valid: false, errors: [] };
+
+function renderDataErrors() {
+  dataValidation = validateGameSets(window.GAME_SETS);
+  const block = $("dataErrorBlock");
+  if (dataValidation.valid) {
+    block.hidden = true;
+  } else {
+    block.hidden = false;
+    $("dataErrorList").innerHTML = dataValidation.errors.map((e) => `<li>${escapeHtml(e)}</li>`).join("");
+  }
+}
+
+function renderTopics() {
+  const wrap = $("topicList");
+  const topics = Array.isArray(window.GAME_SETS) ? window.GAME_SETS : [];
+  wrap.innerHTML = topics
+    .map(
+      (t) => `<button type="button" class="topic-item${state.selectedTopicId === t.id ? " selected" : ""}" data-topic-id="${escapeHtml(t.id)}">
+        <div class="topic-item-title">${escapeHtml(t.title)}</div>
+        ${t.description ? `<div class="topic-item-desc">${escapeHtml(t.description)}</div>` : ""}
+      </button>`
+    )
+    .join("");
+  wrap.querySelectorAll(".topic-item").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.selectedTopicId = btn.dataset.topicId;
+      renderTopics();
+      updateGenerateBtn();
+    });
+  });
+}
+
+function renderClasses() {
+  const wrap = $("classList");
+  const classes = (window.APP_CONFIG && window.APP_CONFIG.classes) || [];
+  wrap.innerHTML = classes
+    .map((c) => `<button type="button" class="class-chip${state.selectedClass === c ? " selected" : ""}" data-class="${escapeHtml(c)}">${escapeHtml(c)}</button>`)
+    .join("");
+  wrap.querySelectorAll(".class-chip").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.selectedClass = btn.dataset.class;
+      renderClasses();
+      updateGenerateBtn();
+    });
+  });
+}
+
+function updateGenerateBtn() {
+  $("btnGenerateQr").disabled = !(dataValidation.valid && state.selectedTopicId && state.selectedClass);
+}
+
+$("inputGameBaseUrl").value = getEffectiveGameBaseUrl();
+$("btnSaveUrl").addEventListener("click", () => {
+  const val = $("inputGameBaseUrl").value.trim();
+  saveGameBaseUrlOverride(val);
+  showFeedback("correct", "저장되었습니다.");
+});
+
+$("btnGenerateQr").addEventListener("click", async () => {
+  if ($("btnGenerateQr").disabled) return;
+  const topic = getTopicById(state.selectedTopicId);
+  if (!topic) return;
+  $("btnGenerateQr").disabled = true;
+  const sessionId = await fsCreateSession(topic.id, topic.title, state.selectedClass);
+  state.topicId = topic.id;
+  state.topicTitle = topic.title;
+  state.className = state.selectedClass;
+  state.sessionId = sessionId;
+  renderQrScreen();
+  showScreen("qr");
+  updateGenerateBtn();
+});
+
+/* ================================================================
+   11. QR 화면
+================================================================ */
+function renderQrScreen() {
+  $("qrTopicBadge").textContent = "📚 " + state.topicTitle;
+  $("qrClassBadge").textContent = "🏫 " + state.className;
+
+  const baseUrl = getEffectiveGameBaseUrl();
+  const warning = $("qrUrlWarning");
+  const imgWrap = $("qrImageWrap");
+  const img = $("qrImage");
+  const fallback = $("qrFallbackMsg");
+
+  if (!baseUrl) {
+    warning.hidden = false;
+    imgWrap.hidden = true;
+    $("qrUrlText").value = "";
+    $("qrDirectLink").href = "#";
+    $("qrDirectLink").style.pointerEvents = "none";
+    return;
+  }
+
+  warning.hidden = true;
+  imgWrap.hidden = false;
+  fallback.hidden = true;
+  img.hidden = false;
+
+  const studentUrl = `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}topic=${encodeURIComponent(state.topicId)}&class=${encodeURIComponent(state.className)}&session=${encodeURIComponent(state.sessionId)}`;
+
+  img.onerror = () => {
+    img.hidden = true;
+    fallback.hidden = false;
+  };
+  img.onload = () => {
+    fallback.hidden = true;
+  };
+  img.src = `https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent(studentUrl)}`;
+
+  $("qrUrlText").value = studentUrl;
+  const link = $("qrDirectLink");
+  link.href = studentUrl;
+  link.style.pointerEvents = "auto";
+}
+
+$("btnQrBack").addEventListener("click", () => {
+  showScreen("start");
+});
+$("btnGoLive").addEventListener("click", () => {
+  fsSubscribeLive(state.sessionId);
+  renderLivePlayers([]);
+  showScreen("live");
+});
+$("btnLiveBack").addEventListener("click", () => {
+  fsUnsubscribeLive();
+  showScreen("qr");
+});
+
+/* ================================================================
+   12. 실시간 현황판
+================================================================ */
+function renderLivePlayers(players) {
+  $("liveTopicBadge").textContent = "📚 " + state.topicTitle;
+  $("liveClassBadge").textContent = "🏫 " + state.className;
+
+  const tbody = $("livePlayerTbody");
+  const emptyMsg = $("liveEmptyMsg");
+
+  if (!players || players.length === 0) {
+    tbody.innerHTML = "";
+    emptyMsg.hidden = false;
+    return;
+  }
+  emptyMsg.hidden = true;
+
+  const finished = players.filter((p) => p.status === "finished").sort((a, b) => (a.finalMs || 0) - (b.finalMs || 0));
+  const playing = players.filter((p) => p.status !== "finished").sort((a, b) => (a.nickname || "").localeCompare(b.nickname || ""));
+  const ordered = finished.concat(playing);
+
+  tbody.innerHTML = ordered
+    .map((p) => {
+      const isFinished = p.status === "finished";
+      const total = p.totalCount || 0;
+      const remaining = p.remainingCount != null ? p.remainingCount : total;
+      const progressPct = total > 0 ? Math.round(((total - remaining) / total) * 100) : 0;
+      return `<tr class="${isFinished ? "player-finished" : ""}">
+        <td>${escapeHtml(p.nickname || "-")}</td>
+        <td><span class="status-pill ${isFinished ? "finished" : "playing"}">${isFinished ? "완료" : "플레이 중"}</span></td>
+        <td>${isFinished ? "100%" : `${progressPct}% (${remaining}개 남음)`}</td>
+        <td>${p.wrongCount || 0}</td>
+        <td>${isFinished ? formatMs(p.finalMs || 0) : "-"}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+/* ================================================================
+   13. 학생 모드 진입
+================================================================ */
+function detectMode() {
+  const params = new URLSearchParams(window.location.search);
+  const topic = params.get("topic");
+  const cls = params.get("class");
+  const session = params.get("session");
+
+  if (topic && cls && session) {
+    const topicObj = getTopicById(topic);
+    if (!topicObj) {
+      state.mode = "student";
+      $("teacherPanel").hidden = true;
+      $("studentPanel").hidden = false;
+      $("studentJoinBlock").hidden = true;
+      $("studentInvalidMsg").hidden = false;
+      return;
+    }
+    state.mode = "student";
+    state.topicId = topic;
+    state.topicTitle = topicObj.title;
+    state.className = cls;
+    state.sessionId = session;
+
+    $("teacherPanel").hidden = true;
+    $("studentPanel").hidden = false;
+    $("studentInvalidMsg").hidden = true;
+    $("studentTopicBadge").textContent = "📚 " + topicObj.title;
+    $("studentClassBadge").textContent = "🏫 " + cls;
+  } else {
+    state.mode = "teacher";
+    $("teacherPanel").hidden = false;
+    $("studentPanel").hidden = true;
+    renderDataErrors();
+    renderTopics();
+    renderClasses();
+    updateGenerateBtn();
+  }
+}
+
+$("btnStartGame").addEventListener("click", async () => {
+  const nickname = $("inputNickname").value.trim();
+  const msg = $("nicknameMsg");
+  if (!nickname) {
+    msg.textContent = "닉네임을 입력해주세요.";
+    msg.hidden = false;
+    return;
+  }
+  msg.hidden = true;
+
+  state.nickname = nickname;
+  state.playerId = generateId();
+
+  const topic = getTopicById(state.topicId);
+  state.round = buildRound(topic);
+
+  await fsCreatePlayer(state.sessionId, state.playerId, nickname, state.round.totalCount);
+
+  renderGameHeader();
+  renderCategoryBar();
+  renderCardGrid();
+  updateStatChips();
+  startTimer();
+  showScreen("game");
+});
+
+/* ================================================================
+   14. 라운드 구성
+================================================================ */
+function buildRound(topic) {
+  const categories = topic.categories.map((cat) => {
+    const cardTexts = pickRandomN(cat.cards, 6);
+    return { name: cat.name, cardTexts, remaining: cardTexts.length, total: cardTexts.length, done: false };
+  });
+
+  const cards = [];
+  categories.forEach((cat) => {
+    cat.cardTexts.forEach((text) => {
+      cards.push({ id: generateId(), text, categoryName: cat.name, popped: false });
+    });
+  });
+  shuffleInPlace(cards);
+
+  return {
+    categories,
+    cards,
+    selectedCategory: null,
+    remainingCount: cards.length,
+    totalCount: cards.length,
+    wrongCount: 0,
+  };
+}
+
+/* ================================================================
+   15. 게임 화면 렌더링
+================================================================ */
+function renderGameHeader() {
+  $("gameTopicTitle").textContent = state.topicTitle;
+  $("gameClassBadge").textContent = "🏫 " + state.className;
+}
+
+function renderCategoryBar() {
+  const wrap = $("categoryBar");
+  wrap.innerHTML = state.round.categories
+    .map((cat) => {
+      const selected = state.round.selectedCategory === cat.name;
+      const done = cat.done;
+      return `<button type="button" class="category-btn${selected ? " selected" : ""}${done ? " done" : ""}" data-cat="${escapeHtml(cat.name)}" ${done ? "disabled" : ""}>
+        <span>${escapeHtml(cat.name)}</span><span class="cat-count">${cat.remaining}</span>
+      </button>`;
+    })
+    .join("");
+  wrap.querySelectorAll(".category-btn").forEach((btn) => {
+    btn.addEventListener("click", () => onCategoryClick(btn.dataset.cat));
+  });
+}
+
+const BALLOON_CLASS_COUNT = 6;
+function renderCardGrid() {
+  const wrap = $("cardGrid");
+  wrap.innerHTML = state.round.cards
+    .map((card, idx) => {
+      const colorClass = "balloon-c" + ((idx % BALLOON_CLASS_COUNT) + 1);
+      const duration = (3.4 + Math.random() * 2.4).toFixed(2);
+      const delay = (Math.random() * -4).toFixed(2);
+      return `<button type="button" class="balloon-card ${colorClass}" data-id="${card.id}" style="--float-duration:${duration}s;--float-delay:${delay}s;">
+        <span class="balloon-text">${escapeHtml(card.text)}</span>
+      </button>`;
+    })
+    .join("");
+  wrap.querySelectorAll(".balloon-card").forEach((el) => {
+    el.addEventListener("click", () => onCardClick(el.dataset.id, el));
+  });
+}
+
+function updateStatChips() {
+  $("statWrong").textContent = state.round.wrongCount;
+  $("statRemaining").textContent = state.round.remainingCount;
+}
+
+/* ================================================================
+   16. 개념 유형 선택
+================================================================ */
+function onCategoryClick(catName) {
+  const cat = state.round.categories.find((c) => c.name === catName);
+  if (!cat || cat.done) return;
+  state.round.selectedCategory = state.round.selectedCategory === catName ? null : catName;
+  renderCategoryBar();
+}
+
+/* ================================================================
+   17. 카드 클릭 판정
+================================================================ */
+const ANIM_MS = { pop: 520, shake: 520 };
+
+function onCardClick(cardId, el) {
+  if (state.inputLocked) return;
+  const card = state.round.cards.find((c) => c.id === cardId && !c.popped);
+  if (!card) return;
+
+  if (!state.round.selectedCategory) {
+    showFeedback("notice", "먼저 개념 유형을 선택하세요!");
+    return;
+  }
+
+  state.inputLocked = true;
+  const selectedCategory = state.round.selectedCategory;
+  const correct = card.categoryName === selectedCategory;
+
+  if (correct) {
+    handleCorrect(card, el, selectedCategory);
+  } else {
+    handleWrong(card, el, selectedCategory);
+  }
+}
+
+function handleCorrect(card, el, selectedCategory) {
+  card.popped = true;
+  const rect = el.getBoundingClientRect();
+  spawnParticles(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  el.classList.add("popping");
+  showFeedback("correct", `정답! "${selectedCategory}" 풍선을 터뜨렸어요. 🎈`);
+
+  const cat = state.round.categories.find((c) => c.name === selectedCategory);
+  cat.remaining -= 1;
+  state.round.remainingCount -= 1;
+  if (cat.remaining <= 0) {
+    cat.done = true;
+    if (state.round.selectedCategory === selectedCategory) {
+      state.round.selectedCategory = null;
+    }
+  }
+
+  updateStatChips();
+  renderCategoryBar();
+  fsUpdateProgress(state.sessionId, state.playerId, state.round.remainingCount, state.round.wrongCount);
+
+  setTimeout(() => {
+    el.remove();
+    state.inputLocked = false;
+    if (state.round.remainingCount <= 0) {
+      finishGame();
+    }
+  }, ANIM_MS.pop);
+}
+
+function handleWrong(card, el, selectedCategory) {
+  state.round.wrongCount += 1;
+  el.classList.add("shaking");
+  showFeedback("wrong", `오답! 선택한 유형은 "${selectedCategory}"인데, 이 풍선은 "${card.categoryName}"예요. (+3초)`);
+  updateStatChips();
+  fsUpdateProgress(state.sessionId, state.playerId, state.round.remainingCount, state.round.wrongCount);
+
+  setTimeout(() => {
+    el.classList.remove("shaking");
+    state.inputLocked = false;
+  }, ANIM_MS.shake);
+}
+
+/* ================================================================
+   18. 타이머
+================================================================ */
+function startTimer() {
+  stopTimer();
+  state.timer.startTime = Date.now();
+  state.timer.elapsedMs = 0;
+  $("statTimer").textContent = "0.0";
+  state.timer.intervalId = setInterval(() => {
+    state.timer.elapsedMs = Date.now() - state.timer.startTime;
+    $("statTimer").textContent = formatSeconds(state.timer.elapsedMs);
+  }, 100);
+}
+function stopTimer() {
+  if (state.timer.intervalId) {
+    clearInterval(state.timer.intervalId);
+    state.timer.intervalId = null;
+  }
+  if (state.timer.startTime) {
+    state.timer.elapsedMs = Date.now() - state.timer.startTime;
+  }
+}
+
+/* ================================================================
+   19. 재시작 / 새 라운드
+================================================================ */
+async function startNewRound() {
+  const topic = getTopicById(state.topicId);
+  state.round = buildRound(topic);
+  state.inputLocked = false;
+  renderCategoryBar();
+  renderCardGrid();
+  updateStatChips();
+  startTimer();
+  await fsCreatePlayer(state.sessionId, state.playerId, state.nickname, state.round.totalCount);
+}
+
+$("btnRestart").addEventListener("click", () => {
+  showConfirm("정말 다시 시작할까요? 진행 상황이 초기화됩니다.", () => {
+    startNewRound();
+  });
+});
+
+/* ================================================================
+   20. 결과 처리
+================================================================ */
+function finishGame() {
+  stopTimer();
+  const clearMs = state.timer.elapsedMs;
+  const penaltyMs = state.round.wrongCount * 3000;
+  const finalMs = clearMs + penaltyMs;
+
+  const resultData = {
+    nickname: state.nickname,
+    className: state.className,
+    topicId: state.topicId,
+    topicTitle: state.topicTitle,
+    clearMs,
+    wrongCount: state.round.wrongCount,
+    penaltyMs,
+    finalMs,
+    createdAt: Date.now(),
+  };
+
+  saveLocalResult(resultData);
+  fsFinishPlayer(state.sessionId, state.playerId, resultData);
+  showResultScreen(resultData);
+}
+
+async function showResultScreen(resultData) {
+  $("resultNickname").textContent = resultData.nickname;
+  $("resultTopic").textContent = resultData.topicTitle;
+  $("resultClass").textContent = resultData.className;
+  $("resultClearTime").textContent = formatMs(resultData.clearMs);
+  $("resultWrongCount").textContent = resultData.wrongCount + "회";
+  $("resultPenalty").textContent = "+" + formatMs(resultData.penaltyMs);
+  $("resultFinalTime").textContent = formatMs(resultData.finalMs);
+
+  renderConceptAccordion();
+  showScreen("result");
+  await renderRanking(resultData);
+}
+
+async function renderRanking(currentResult) {
+  const listEl = $("rankingList");
+  const noteEl = $("rankingSourceNote");
+  listEl.innerHTML = `<li class="ranking-empty">랭킹을 불러오는 중...</li>`;
+  noteEl.textContent = "";
+
+  const { source, items } = await fetchRanking(currentResult.topicId, currentResult.className);
+
+  noteEl.textContent = source === "firebase" ? "실시간 랭킹 (Firebase)" : "오프라인 로컬 랭킹 (이 기기에만 저장됨)";
+
+  if (!items || items.length === 0) {
+    listEl.innerHTML = `<li class="ranking-empty">아직 기록이 없습니다. 첫 기록의 주인공이 되어보세요!</li>`;
+    return;
+  }
+
+  listEl.innerHTML = items
+    .map((item, idx) => {
+      const isCurrent =
+        item.nickname === currentResult.nickname &&
+        item.finalMs === currentResult.finalMs &&
+        item.wrongCount === currentResult.wrongCount;
+      return `<li class="ranking-item${isCurrent ? " current" : ""}">
+        <span class="ranking-rank">${idx + 1}</span>
+        <span class="ranking-name">${escapeHtml(item.nickname)}</span>
+        <span class="ranking-time">${formatMs(item.finalMs)}</span>
+      </li>`;
+    })
+    .join("");
+}
+
+function renderConceptAccordion() {
+  const wrap = $("conceptAccordion");
+  wrap.innerHTML = state.round.categories
+    .map(
+      (cat, idx) => `<div class="accordion-item" data-idx="${idx}">
+        <button type="button" class="accordion-head">
+          <span>${escapeHtml(cat.name)}</span><span class="chev">▾</span>
+        </button>
+        <div class="accordion-body">
+          <ul class="accordion-body-inner">
+            ${cat.cardTexts.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}
+          </ul>
+        </div>
+      </div>`
+    )
+    .join("");
+
+  wrap.querySelectorAll(".accordion-item").forEach((item) => {
+    item.querySelector(".accordion-head").addEventListener("click", () => {
+      item.classList.toggle("open");
+    });
+  });
+}
+
+/* ================================================================
+   21. 결과 화면 버튼
+================================================================ */
+$("btnRetry").addEventListener("click", async () => {
+  await startNewRound();
+  showScreen("game");
+});
+
+$("btnBackToTopics").addEventListener("click", () => {
+  if (state.mode === "student") {
+    $("inputNickname").value = "";
+    $("nicknameMsg").hidden = true;
+  }
+  showScreen("start");
+});
+
+$("btnResetRanking").addEventListener("click", () => {
+  showConfirm("이 기기에 저장된 로컬 랭킹 기록을 모두 삭제할까요? (Firebase에 저장된 기록은 삭제되지 않습니다)", () => {
+    resetLocalRanking();
+    showFeedback("correct", "로컬 랭킹이 초기화되었습니다.");
+    if (state.topicId && state.className) {
+      fetchRanking(state.topicId, state.className).then(({ source, items }) => {
+        const noteEl = $("rankingSourceNote");
+        if (noteEl) noteEl.textContent = source === "firebase" ? "실시간 랭킹 (Firebase)" : "오프라인 로컬 랭킹 (이 기기에만 저장됨)";
+        const listEl = $("rankingList");
+        if (listEl) {
+          listEl.innerHTML =
+            items && items.length
+              ? items.map((item, idx) => `<li class="ranking-item"><span class="ranking-rank">${idx + 1}</span><span class="ranking-name">${escapeHtml(item.nickname)}</span><span class="ranking-time">${formatMs(item.finalMs)}</span></li>`).join("")
+              : `<li class="ranking-empty">아직 기록이 없습니다.</li>`;
+        }
+      });
+    }
+  });
+});
+
+/* ================================================================
+   22. 초기화
+================================================================ */
+function init() {
+  applyVisualPrefs();
+  renderBgBalloons();
+  detectMode();
+}
+
+init();
