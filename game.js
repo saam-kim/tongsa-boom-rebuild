@@ -1,5 +1,5 @@
 // ================================================================
-// 통사풍선터뜨리기 — game.js (게임 로직 / 교사가 건드리지 않는 파일)
+// 통사POP — game.js (게임 로직 / 교사가 건드리지 않는 파일)
 // ================================================================
 "use strict";
 
@@ -15,10 +15,10 @@ try {
     db = firebase.firestore();
     firebaseEnabled = true;
   } else {
-    console.warn("[통사풍선터뜨리기] firebaseConfig가 설정되지 않아 실시간 연동 없이 동작합니다.");
+    console.warn("[통사POP] firebaseConfig가 설정되지 않아 실시간 연동 없이 동작합니다.");
   }
 } catch (e) {
-  console.error("[통사풍선터뜨리기] Firebase 초기화 실패", e);
+  console.error("[통사POP] Firebase 초기화 실패", e);
   firebaseEnabled = false;
 }
 
