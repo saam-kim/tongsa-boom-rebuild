@@ -39,7 +39,7 @@ const firebaseConfig = {
 //     "https://내아이디.github.io/저장소이름/index.html"
 // 비워두면("") QR 코드가 생성되지 않고 안내 문구가 표시됩니다.
 // ----------------------------------------------------------------
-const gameBaseUrl = "https://saam-kim.github.io/tongsa-boom-rebuild/index.html";
+const gameBaseUrl = "https://saam-kim.github.io/tongsa-pop/index.html";
 
 // ----------------------------------------------------------------
 // 3) 반 목록 (교사가 원하는 대로 자유롭게 수정하세요)
